@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <title>Scholafy</title>
+    <meta name="description" content="Delegated teaching with accountability." />
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Poppins', 'sans-serif'],
+            },
+            colors: {
+              scholafy: {
+                navy: '#0b1527',
+                panel: '#001F3F',
+                accent: '#F3C500',
+                card: '#12213a',
+                border: '#345b9a80',
+                text: '#ffffff',
+                muted: '#9fb4d3',
+                success: '#1db954',
+                error: '#ff453a',
+              }
+            },
+            animation: {
+              'scroll': 'scroll 40s linear infinite',
+              'fade-in-up': 'fadeInUp 0.8s ease-out forwards',
+            },
+            keyframes: {
+              scroll: {
+                '0%': { transform: 'translateX(0)' },
+                '100%': { transform: 'translateX(-50%)' },
+              },
+              fadeInUp: {
+                '0%': { opacity: '0', transform: 'translateY(20px)' },
+                '100%': { opacity: '1', transform: 'translateY(0)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+
+    <!-- Player Dependencies (Locked Contract) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/plyr@3/dist/plyr.css" />
+    <script src="https://cdn.jsdelivr.net/npm/plyr@3/dist/plyr.polyfilled.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.11/dist/interact.min.js"></script>
+    
+    <style>
+      /* Critical behavioral overrides from player.html spec */
+      .plyr--hide-controls .plyr__controls { display: none !important; }
+      .plyr--hide-controls .plyr__control--overlaid { display: none !important; }
+      .plyr__controls { z-index: 6 !important; }
+      
+      /* Global reset for drag/drop visibility */
+      .drag { touch-action: none; user-select: none; }
+      
+      /* Animation Utilities compatible with tailwindcss-animate syntax */
+      .animate-in { animation-duration: 0.5s; animation-fill-mode: both; }
+      .fade-in { animation-name: fadeIn; }
+      .slide-in-from-bottom-4 { animation-name: slideInBottom4; }
+      .slide-in-from-bottom-2 { animation-name: slideInBottom2; }
+      .slide-in-from-left-2 { animation-name: slideInLeft2; }
+      .slide-in-from-right-4 { animation-name: slideInRight4; }
+      .slide-in-from-right-10 { animation-name: slideInRight10; }
+      .slide-in-from-top-2 { animation-name: slideInTop2; }
+      .zoom-in { animation-name: zoomIn; }
+      
+      @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes slideInBottom4 { from { transform: translateY(1rem); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      @keyframes slideInBottom2 { from { transform: translateY(0.5rem); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      @keyframes slideInLeft2 { from { transform: translateX(-0.5rem); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+      @keyframes slideInRight4 { from { transform: translateX(1rem); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+      @keyframes slideInRight10 { from { transform: translateX(2.5rem); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+      @keyframes slideInTop2 { from { transform: translateY(-0.5rem); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      @keyframes zoomIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+      
+      @keyframes shake {
+        0%{transform:translateX(0)}
+        20%{transform:translateX(-6px)}
+        40%{transform:translateX(6px)}
+        60%{transform:translateX(-6px)}
+        80%{transform:translateX(6px)}
+        100%{transform:translateX(0)}
+      }
+      .shake { animation: shake .4s; }
+      
+      /* Custom Scrollbar */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.3);
+      }
+
+      body {
+        background-color: #0b1527;
+        color: white;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
