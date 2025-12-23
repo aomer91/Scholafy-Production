@@ -3,6 +3,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { ViewState, ChildProfile, Lesson, LessonResult, BackgroundSession, CurriculumStats, Quote, SubjectStats, Badge } from '../types';
 import { supabase } from '../lib/supabase';
 import { STATIC_LESSONS } from '../lib/lessonData';
+import { useAuth } from './AuthContext';
 
 interface AppContextType {
   view: ViewState;
@@ -27,7 +28,7 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const DEMO_PROFILE_ID = '00000000-0000-0000-0000-000000000000';
+// Demo ID - REMOVED for dynamic sync
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [view, setView] = useState<ViewState>(ViewState.LANDING);
@@ -43,10 +44,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [childProfile, setChildProfile] = useState<ChildProfile | null>(null);
   const [lessonHistory, setLessonHistory] = useState<LessonResult[]>([]);
+  const { user } = useAuth();
 
   // --- INITIAL DATA FETCH ---
   useEffect(() => {
     const fetchInitialData = async () => {
+      if (!user) return;
       setIsLoading(true);
       try {
         // 1. Fetch Static Content (Parallel)
@@ -89,17 +92,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         let { data: profile } = await supabase
           .from('profiles')
           .select('*')
-          .eq('id', DEMO_PROFILE_ID)
+          .eq('id', user.id)
           .single();
 
         if (!profile) {
           const { data: newProfile } = await supabase.from('profiles').upsert([{
-            id: DEMO_PROFILE_ID,
-            name: "Shakir",
-            year_group: 3,
-            streak_days: 12,
-            xp: 2450,
-            level: 2,
+            id: user.id,
+            name: user.user_metadata?.name || "Shakir",
+            year_group: user.user_metadata?.year_group || 3,
+            streak_days: 0,
+            xp: 0,
+            level: 1,
             badges: []
           }]).select().single();
           profile = newProfile;
@@ -120,20 +123,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const { data: assignments } = await supabase
           .from('assignments')
           .select('lesson_id')
-          .eq('profile_id', DEMO_PROFILE_ID);
+          .eq('profile_id', user.id);
 
         if (assignments && loadedLessons.length > 0) {
           const matched = loadedLessons.filter(l => assignments.some(a => a.lesson_id === l.id));
-          setAssignedLessons(matched.length > 0 ? matched : [loadedLessons[0]]);
-        } else if (loadedLessons.length > 0) {
-          setAssignedLessons([loadedLessons[0]]);
+          setAssignedLessons(matched.length > 0 ? matched : []);
+        } else {
+          setAssignedLessons([]);
         }
 
         // 4. Fetch History
         const { data: history } = await supabase
           .from('lesson_history')
           .select('*')
-          .eq('profile_id', DEMO_PROFILE_ID)
+          .eq('profile_id', user.id)
           .order('timestamp', { ascending: false });
 
         if (history) {
@@ -157,7 +160,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     fetchInitialData();
-  }, []);
+  }, [user, availableLessons.length]);
 
   // --- CURRICULUM STATS CALCULATION ---
   const [curriculumStats, setCurriculumStats] = useState<CurriculumStats>({
@@ -209,16 +212,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // --- OPERATIONS ---
 
   const assignLesson = async (lessonId: string) => {
+    if (!user) return;
     const lesson = availableLessons.find(l => l.id === lessonId);
     if (lesson && !assignedLessons.find(al => al.id === lessonId)) {
       setAssignedLessons([...assignedLessons, lesson]);
-      await supabase.from('assignments').insert([{ profile_id: DEMO_PROFILE_ID, lesson_id: lessonId }]);
+      await supabase.from('assignments').insert([{ profile_id: user.id, lesson_id: lessonId }]);
     }
   };
 
   const unassignLesson = async (lessonId: string) => {
+    if (!user) return;
     setAssignedLessons(prev => prev.filter(l => l.id !== lessonId));
-    await supabase.from('assignments').delete().eq('profile_id', DEMO_PROFILE_ID).eq('lesson_id', lessonId);
+    await supabase.from('assignments').delete().eq('profile_id', user.id).eq('lesson_id', lessonId);
   };
 
   const saveLessonResult = async (result: LessonResult) => {
@@ -247,7 +252,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Fix: Using correct property name result.badgesEarned instead of result.badges_earned
     await supabase.from('lesson_history').insert([{
-      profile_id: DEMO_PROFILE_ID,
+      profile_id: user.id,
       lesson_id: result.lessonId,
       status: result.status,
       score_percent: result.scorePercent,
@@ -259,7 +264,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setLessonHistory(prev => [result, ...prev]);
     if (result.status === 'completed') await unassignLesson(result.lessonId);
-    await supabase.from('live_sessions').delete().eq('profile_id', DEMO_PROFILE_ID);
+    await supabase.from('live_sessions').delete().eq('profile_id', user.id);
 
     if (result.status === 'completed' && earnedXP > 0) {
       const newXP = childProfile.xp + earnedXP;
@@ -270,7 +275,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         xp: newXP,
         level: newLevel,
         badges: newBadgeIds
-      }).eq('id', DEMO_PROFILE_ID).select().single();
+      }).eq('id', user.id).select().single();
 
       if (updatedProfile) {
         setChildProfile({

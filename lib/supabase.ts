@@ -1,5 +1,5 @@
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7';
+import { createClient } from '@supabase/supabase-js';
 
 /**
  * DATABASE CONNECTION
@@ -11,11 +11,18 @@ const supabaseAnonKey: string = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi
 
 export const isSupabaseConfigured = () => {
   return (
-    supabaseUrl !== 'https://your-project-id.supabase.co' && 
+    supabaseUrl !== 'https://your-project-id.supabase.co' &&
     supabaseAnonKey !== 'your-anon-key' &&
     supabaseUrl.includes('supabase.co') &&
     supabaseAnonKey.length > 20
   );
 };
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    flowType: 'pkce',
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: true,
+  }
+});

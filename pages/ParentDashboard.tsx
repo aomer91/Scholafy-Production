@@ -3,9 +3,10 @@ import { useApp } from '../context/AppContext';
 import { Button } from '../components/Button';
 import { ViewState, LiveStatus, LessonResult, QuestionRecord, Lesson, SubjectStats } from '../types';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
 
 // Demo ID
-const DEMO_PROFILE_ID = '00000000-0000-0000-0000-000000000000';
+// Demo ID - REMOVED
 
 // --- HELPER COMPONENTS ---
 
@@ -378,11 +379,12 @@ export const ParentDashboard: React.FC = () => {
     const [expandedStrands, setExpandedStrands] = useState<Set<string>>(new Set());
     const [stagingQueue, setStagingQueue] = useState<Lesson[]>([]);
     const [isCloudConnected, setIsCloudConnected] = useState(false);
+    const { user } = useAuth();
 
     // --- SYNC LOGIC ---
     const fetchInitialLive = useCallback(async () => {
-        if (!isSupabaseConfigured()) return;
-        const { data, error } = await supabase.from('live_sessions').select('*').eq('profile_id', DEMO_PROFILE_ID).maybeSingle();
+        if (!isSupabaseConfigured() || !user) return;
+        const { data, error } = await supabase.from('live_sessions').select('*').eq('profile_id', user.id).maybeSingle();
 
         if (error) {
             console.error("Initial fetch error:", error);
@@ -410,7 +412,7 @@ export const ParentDashboard: React.FC = () => {
 
     // --- SUPABASE REAL-TIME SUBSCRIPTION + POLLING FALLBACK ---
     useEffect(() => {
-        if (!isSupabaseConfigured()) return;
+        if (!isSupabaseConfigured() || !user) return;
 
         fetchInitialLive();
 
@@ -420,7 +422,7 @@ export const ParentDashboard: React.FC = () => {
                 event: '*',
                 schema: 'public',
                 table: 'live_sessions',
-                filter: `profile_id=eq.${DEMO_PROFILE_ID}`
+                filter: `profile_id=eq.${user.id}`
             }, (payload) => {
                 setIsCloudConnected(true);
                 if (payload.eventType === 'DELETE') {
@@ -451,7 +453,7 @@ export const ParentDashboard: React.FC = () => {
             supabase.removeChannel(channel);
             clearInterval(pollInterval);
         };
-    }, [fetchInitialLive]);
+    }, [fetchInitialLive, user]);
 
     const addToStaging = (lesson: Lesson) => {
         if (!stagingQueue.find(l => l.id === lesson.id) && !assignedLessons.find(l => l.id === lesson.id)) {
