@@ -1,13 +1,12 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ViewState, ChildProfile, Lesson, LessonResult, BackgroundSession, CurriculumStats, Quote, SubjectStats, Badge } from '../types';
 import { supabase } from '../lib/supabase';
-import { STATIC_LESSONS } from '../lib/lessonData';
 import { useAuth } from './AuthContext';
+import { calculateInsights } from '../utils/insightEngine';
 
 interface AppContextType {
-  view: ViewState;
-  setView: (v: ViewState) => void;
   childProfile: ChildProfile | null;
   assignedLessons: Lesson[];
   assignLesson: (lessonId: string) => Promise<void>;
@@ -31,7 +30,7 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 // Demo ID - REMOVED for dynamic sync
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [view, setView] = useState<ViewState>(ViewState.LANDING);
+  const navigate = useNavigate();
   const [assignedLessons, setAssignedLessons] = useState<Lesson[]>([]);
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
   const [backgroundSession, setBackgroundSession] = useState<BackgroundSession | null>(null);
@@ -76,9 +75,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             questions: l.questions,
             exits: l.exits
           }));
-        } else {
-          // Fallback static lessons if Supabase is empty, or use this for local dev override
-          loadedLessons = STATIC_LESSONS;
         }
         setAvailableLessons(loadedLessons);
 
@@ -93,7 +89,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .from('profiles')
           .select('*')
           .eq('id', user.id)
-          .single();
+          .maybeSingle();
 
         if (!profile) {
           const { data: newProfile } = await supabase.from('profiles').upsert([{
@@ -148,7 +144,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             scorePercent: h.score_percent,
             records: h.records,
             xpEarned: h.xp_earned,
-            badgesEarned: h.badges_earned
+            badgesEarned: h.badges_earned,
+            effortGrade: h.effort_grade,
+            focusIndex: h.focus_index,
+            masteryLevel: h.mastery_level,
+            insightText: h.insight_text
           })));
         }
 
@@ -160,7 +160,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     fetchInitialData();
-  }, [user, availableLessons.length]);
+  }, [user?.id, availableLessons.length]);
+
+  // --- REAL-TIME SUBSCRIPTIONS ---
+  useEffect(() => {
+    if (!user || availableLessons.length === 0) return;
+
+    const channel = supabase.channel('app-db-changes')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'assignments',
+        filter: `profile_id=eq.${user.id}`
+      }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          const lesson = availableLessons.find(l => l.id === payload.new.lesson_id);
+          if (lesson) {
+            setAssignedLessons(prev => {
+              if (prev.find(l => l.id === lesson.id)) return prev;
+              return [...prev, lesson];
+            });
+          }
+        } else if (payload.eventType === 'DELETE') {
+          setAssignedLessons(prev => prev.filter(l => l.id !== payload.old.lesson_id));
+        }
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'profiles',
+        filter: `id=eq.${user.id}`
+      }, (payload) => {
+        setChildProfile({
+          name: payload.new.name,
+          yearGroup: payload.new.year_group,
+          streakDays: payload.new.streak_days,
+          xp: payload.new.xp,
+          level: payload.new.level,
+          badges: payload.new.badges || []
+        });
+      })
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'lesson_history',
+        filter: `profile_id=eq.${user.id}`
+      }, (payload) => {
+        const newResult: LessonResult = {
+          lessonId: payload.new.lesson_id,
+          status: payload.new.status,
+          timestamp: new Date(payload.new.timestamp).getTime(),
+          durationSeconds: payload.new.duration_seconds,
+          scorePercent: payload.new.score_percent,
+          records: payload.new.records,
+          xpEarned: payload.new.xp_earned,
+          badgesEarned: payload.new.badges_earned,
+          effortGrade: payload.new.effort_grade,
+          focusIndex: payload.new.focus_index,
+          masteryLevel: payload.new.mastery_level,
+          insightText: payload.new.insight_text
+        };
+        setLessonHistory(prev => {
+          if (prev.find(h => h.timestamp === newResult.timestamp && h.lessonId === newResult.lessonId)) return prev;
+          return [newResult, ...prev];
+        });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user?.id, availableLessons]);
 
   // --- CURRICULUM STATS CALCULATION ---
   const [curriculumStats, setCurriculumStats] = useState<CurriculumStats>({
@@ -182,12 +252,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ? completedResults.reduce((acc, curr) => acc + curr.scorePercent, 0) / completedResults.length
       : 0;
 
-    let standard: 'WTS' | 'EXS' | 'GDS' = 'WTS';
-    if (avgScore >= 80) standard = 'GDS';
-    else if (avgScore >= 50) standard = 'EXS';
+    let standard: 'PK' | 'WTS' | 'EXS' | 'GDS' = 'PK';
+    if (avgScore >= 90) standard = 'GDS';
+    else if (avgScore >= 65) standard = 'EXS';
+    else if (avgScore >= 35) standard = 'WTS';
 
     const subjects: Record<string, SubjectStats> = {};
-    const allSubjects = Array.from(new Set(availableLessons.map(l => l.subject)));
+    const allSubjects: string[] = Array.from(new Set(availableLessons.map(l => l.subject)));
 
     allSubjects.forEach(sub => {
       const subLessons = availableLessons.filter(l => l.subject === sub);
@@ -239,74 +310,108 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result.xpEarned = earnedXP;
 
       const currentBadges = new Set(childProfile.badges);
+
+      // 1. First Steps
       if (lessonHistory.filter(h => h.status === 'completed').length === 0 && !currentBadges.has('first_steps')) {
         const b = availableBadges.find(b => b.id === 'first_steps');
         if (b) earnedBadges.push(b);
       }
-      if (result.scorePercent === 100 && !currentBadges.has('perfectionist')) {
-        const b = availableBadges.find(b => b.id === 'perfectionist');
+
+      // 2. Mastery Badges (Diamond, Gold, Silver, Bronze)
+      let masteryBadgeId = '';
+      if (result.scorePercent >= 90) masteryBadgeId = 'diamond_crown';
+      else if (result.scorePercent >= 65) masteryBadgeId = 'gold_medal';
+      else if (result.scorePercent >= 35) masteryBadgeId = 'silver_shield';
+      else masteryBadgeId = 'bronze_key';
+
+      if (masteryBadgeId) {
+        const b = availableBadges.find(b => b.id === masteryBadgeId);
         if (b) earnedBadges.push(b);
       }
+
+      // 3. Laser Eye (Focus) - Zero questions > 120s
+      const hasLostAlert = result.records.some(r => (r.questionDurationSeconds || 0) > 120);
+      if (!hasLostAlert) {
+        const b = availableBadges.find(b => b.id === 'laser_eye');
+        if (b) earnedBadges.push(b);
+      }
+
+      // 4. Accuracy Pro (No Guessing) - Zero incorrect answers < 4s
+      const hasFlashGuess = result.records.some(r => !r.isCorrect && (r.questionDurationSeconds || 0) < 4);
+      if (!hasFlashGuess) {
+        const b = availableBadges.find(b => b.id === 'accuracy_pro');
+        if (b) earnedBadges.push(b);
+      }
+
       result.badgesEarned = earnedBadges;
     }
 
-    // Fix: Using correct property name result.badgesEarned instead of result.badges_earned
-    await supabase.from('lesson_history').insert([{
-      profile_id: user.id,
-      lesson_id: result.lessonId,
-      status: result.status,
-      score_percent: result.scorePercent,
-      xp_earned: result.xpEarned,
-      duration_seconds: result.durationSeconds,
-      records: result.records,
-      badges_earned: result.badgesEarned
-    }]);
+    try {
+      // Fix: Using correct property name result.badgesEarned instead of result.badges_earned
+      // --- CALCULATE INSIGHTS ---
+      const lessonTitle = availableLessons.find(l => l.id === result.lessonId)?.title || "Unknown Lesson";
+      const insights = calculateInsights(
+        result.records,
+        result.scorePercent,
+        lessonTitle,
+        childProfile?.name || "Student"
+      );
 
-    setLessonHistory(prev => [result, ...prev]);
-    if (result.status === 'completed') await unassignLesson(result.lessonId);
-    await supabase.from('live_sessions').delete().eq('profile_id', user.id);
+      const { error: insertError } = await supabase.from('lesson_history').insert([{
+        profile_id: user.id,
+        lesson_id: result.lessonId,
+        status: result.status,
+        score_percent: result.scorePercent,
+        xp_earned: result.xpEarned,
+        duration_seconds: result.durationSeconds,
+        records: result.records,
+        badges_earned: result.badgesEarned || [], // Ensure it's never undefined
 
-    if (result.status === 'completed' && earnedXP > 0) {
-      const newXP = childProfile.xp + earnedXP;
-      const newLevel = Math.floor(newXP / 1000) + 1;
-      const newBadgeIds = [...childProfile.badges, ...earnedBadges.map(b => b.id)];
+        // New Diagnostic Columns
+        effort_grade: insights.effortGrade,
+        focus_index: insights.focusIndex,
+        mastery_level: insights.masteryLevel,
+        insight_text: insights.insightText
+      }]);
 
-      const { data: updatedProfile } = await supabase.from('profiles').update({
-        xp: newXP,
-        level: newLevel,
-        badges: newBadgeIds
-      }).eq('id', user.id).select().single();
+      if (insertError) throw insertError;
 
-      if (updatedProfile) {
-        setChildProfile({
-          name: updatedProfile.name,
-          yearGroup: updatedProfile.year_group,
-          streakDays: updatedProfile.streak_days,
-          xp: updatedProfile.xp,
-          level: updatedProfile.level,
-          badges: updatedProfile.badges
-        });
+      setLessonHistory(prev => [result, ...prev]);
+      if (result.status === 'completed') await unassignLesson(result.lessonId);
+      await supabase.from('live_sessions').delete().eq('profile_id', user.id);
+
+      if (result.status === 'completed' && earnedXP > 0) {
+        const newXP = childProfile.xp + earnedXP;
+        const newLevel = Math.floor(newXP / 1000) + 1;
+        const newBadgeIds = [...childProfile.badges, ...(earnedBadges || []).map(b => b.id)]; // Safe map
+
+        const { data: updatedProfile, error: profileError } = await supabase.from('profiles').update({
+          xp: newXP,
+          level: newLevel,
+          badges: newBadgeIds
+        }).eq('id', user.id).select().single();
+
+        if (profileError) throw profileError;
+
+        if (updatedProfile) {
+          setChildProfile({
+            name: updatedProfile.name,
+            yearGroup: updatedProfile.year_group,
+            streakDays: updatedProfile.streak_days,
+            xp: updatedProfile.xp,
+            level: updatedProfile.level,
+            badges: updatedProfile.badges || []
+          });
+        }
       }
-    }
-  };
-
-  const minimizeSession = (session: BackgroundSession) => {
-    setBackgroundSession(session);
-    setActiveLessonId(null);
-    setView(ViewState.ROLE_SELECT);
-  };
-
-  const resumeSession = () => {
-    if (backgroundSession) {
-      setActiveLessonId(backgroundSession.lessonId);
-      setView(ViewState.PLAYER);
+    } catch (error) {
+      console.error("Failed to save lesson result:", error);
+      throw error; // Re-throw to let Player.tsx handle the UI
     }
   };
 
   return (
     <AppContext.Provider value={{
-      view,
-      setView,
       childProfile,
       assignedLessons,
       assignLesson,
@@ -317,8 +422,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       lessonHistory,
       saveLessonResult,
       backgroundSession,
-      minimizeSession,
-      resumeSession,
+      minimizeSession: (session: BackgroundSession) => {
+        setBackgroundSession(session);
+        setActiveLessonId(null);
+        navigate('/child');
+      },
+      resumeSession: () => {
+        if (backgroundSession) {
+          setActiveLessonId(backgroundSession.lessonId);
+          navigate(`/player/${backgroundSession.lessonId}`);
+        }
+      },
       curriculumStats,
       dailyQuote,
       availableBadges,

@@ -2,21 +2,20 @@
 import { Question } from '../types';
 import { supabase } from '../lib/supabase';
 
-// Demo ID
-const DEMO_PROFILE_ID = '00000000-0000-0000-0000-000000000000';
+// Profile ID is now passed dynamically from useAuth
 
 /**
  * Publishes the current learning state to Supabase.
  * This allows the parent dashboard to monitor progress in real-time.
  */
-export const publishLiveStatus = async (lessonId: string, payload: any, signal?: AbortSignal) => {
-  if (!lessonId) return;
+export const publishLiveStatus = async (profileId: string, lessonId: string, payload: any, signal?: AbortSignal) => {
+  if (!lessonId || !profileId) return;
 
   try {
     let query = supabase
       .from('live_sessions')
       .upsert({
-        profile_id: DEMO_PROFILE_ID,
+        profile_id: profileId,
         lesson_id: lessonId,
         mode: payload.mode,
         t: payload.t || 0,
@@ -47,12 +46,13 @@ export const publishLiveStatus = async (lessonId: string, payload: any, signal?:
 /**
  * Deletes the live session row from Supabase.
  */
-export const deleteLiveStatus = async () => {
+export const deleteLiveStatus = async (profileId: string) => {
+  if (!profileId) return;
   try {
     const { error } = await supabase
       .from('live_sessions')
       .delete()
-      .eq('profile_id', DEMO_PROFILE_ID);
+      .eq('profile_id', profileId);
 
     if (error) {
       console.error("Error deleting live status:", error);

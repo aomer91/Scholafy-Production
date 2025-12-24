@@ -61,8 +61,9 @@ export interface Option {
 // Analytics & State Types
 
 export interface LiveStatus {
+  profileId: string;
   lessonId: string;
-  mode: 'idle' | 'video' | 'question' | 'starter' | 'exit';
+  mode: 'idle' | 'video' | 'question' | 'starter' | 'exit' | 'paused' | 'minimized';
   t?: number; // Current timestamp in video
   total?: number; // Total duration
   qIndex?: number;
@@ -93,6 +94,11 @@ export interface LessonResult {
   records: QuestionRecord[];
   xpEarned: number;
   badgesEarned?: Badge[]; // New badges won this session
+  // New Diagnostic Fields
+  effortGrade?: string; // 'A', 'B', 'C', etc.
+  focusIndex?: number; // 0-100
+  masteryLevel?: 'PK' | 'WTS' | 'EXS' | 'GDS';
+  insightText?: string; // AI generated narrative
 }
 
 export interface QuestionRecord {
@@ -116,6 +122,7 @@ export interface BackgroundSession {
   starterResults: boolean[];
   phase: 'starter' | 'video' | 'question' | 'exit' | 'complete';
   startTimestamp: number;
+  pendingQuestionId?: string; // Question that needs to be answered before video can continue
 }
 
 export interface Badge {
@@ -145,7 +152,7 @@ export interface CurriculumStats {
   totalLessons: number;
   completedLessons: number;
   averageScore: number;
-  currentStandard: 'WTS' | 'EXS' | 'GDS'; // Working Towards, Expected, Greater Depth
+  currentStandard: 'PK' | 'WTS' | 'EXS' | 'GDS'; // Foundations, Working Towards, Expected, Greater Depth
   completionPercent: number;
   subjects: Record<string, SubjectStats>; // Breakdown by subject
 }

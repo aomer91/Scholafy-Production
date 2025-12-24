@@ -90,6 +90,13 @@ CREATE TABLE lesson_history (
     duration_seconds INTEGER DEFAULT 0,
     records JSONB DEFAULT '[]'::jsonb,
     badges_earned JSONB DEFAULT '[]'::jsonb,
+    
+    -- Diagnostic / AI Insight Columns
+    effort_grade TEXT,
+    focus_index INTEGER,
+    mastery_level TEXT,
+    insight_text TEXT,
+    
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -137,8 +144,18 @@ CREATE OR REPLACE TRIGGER on_auth_user_created
 -- ==========================================
 
 INSERT INTO badges (id, name, description, icon, color) VALUES
+-- Mastery Achievement Levels
+('diamond_crown', 'The Diamond Crown', 'Comprehensive mastery and high precision (90%+)', '💎', 'bg-blue-300'),
+('gold_medal', 'The Gold Medal', 'Working At the required level (65%-89%)', '🥇', 'bg-yellow-500'),
+('silver_shield', 'The Silver Shield', 'Understanding the basics (35%-64%)', '🛡️', 'bg-slate-400'),
+('bronze_key', 'The Bronze Key', 'Foundations; needs more practice (< 35%)', '🔑', 'bg-orange-700'),
+
+-- Rewarding the "How"
+('laser_eye', 'The Laser Eye', 'Awarded for zero "Lost" alerts (high focus)', '👁️', 'bg-red-500'),
+('accuracy_pro', 'The Accuracy Pro', 'Awarded for zero flash guesses (methodical)', '🎯', 'bg-green-500'),
+
+-- Legacy/Other
 ('first_steps', 'First Steps', 'Complete your first lesson', '🚀', 'bg-blue-500'),
-('perfectionist', 'Perfectionist', 'Score 100% on a lesson', '💎', 'bg-purple-500'),
 ('math_whiz', 'Number Ninja', 'Complete 3 Maths lessons', '📐', 'bg-blue-400'),
 ('streak_3', 'On Fire', 'Reach a 3-day streak', '🔥', 'bg-orange-500');
 
@@ -193,6 +210,7 @@ CREATE POLICY "Public Read Quotes" ON quotes FOR SELECT USING (true);
 -- Allow users to read/update ONLY their own profile
 CREATE POLICY "Users can read own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "Users can insert own profile" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
 
 -- Allow users to read/create/update their own assignments/sessions/history
 CREATE POLICY "Users own assignments" ON assignments FOR ALL USING (auth.uid() = profile_id);

@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { renderQuestion, publishLiveStatus, deleteLiveStatus } from '../utils/playerEngine';
 import { Question, LiveStatus, QuestionRecord, LessonResult, BackgroundSession, Badge, ViewState } from '../types';
 import { Button } from './Button';
 import { supabase } from '../lib/supabase';
+import { useAuth } from '../context/AuthContext';
 
-const DEMO_PROFILE_ID = '00000000-0000-0000-0000-000000000000';
+
 
 declare global {
   interface Window {
@@ -14,20 +16,54 @@ declare global {
 }
 
 export const Player: React.FC = () => {
-  const { activeLessonId, setActiveLessonId, setView, availableLessons, saveLessonResult, backgroundSession, minimizeSession } = useApp();
-  const lesson = availableLessons.find(l => l.id === activeLessonId);
+  const { activeLessonId, setActiveLessonId, availableLessons, saveLessonResult, backgroundSession, minimizeSession } = useApp();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const { lessonId: urlLessonId } = useParams();
+
+  // Support both context and URL lesson ID
+  const effectiveLessonId = urlLessonId || activeLessonId;
+  const lesson = availableLessons.find(l => l.id === effectiveLessonId);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerInstance = useRef<any>(null);
 
-  const sessionStartRef = useRef<number>(Date.now());
-  const historyRef = useRef<QuestionRecord[]>([]);
+  // Restore session start timestamp from background session if available
+  const sessionStartRef = useRef<number>(
+    backgroundSession && backgroundSession.lessonId === activeLessonId
+      ? backgroundSession.startTimestamp
+      : Date.now()
+  );
 
-  const [completedQuestionIds, setCompletedQuestionIds] = useState<Set<string>>(new Set());
-  const [starterResults, setStarterResults] = useState<boolean[]>([]);
+  // Restore history from background session if available
+  const historyRef = useRef<QuestionRecord[]>(
+    backgroundSession && backgroundSession.lessonId === activeLessonId && backgroundSession.history
+      ? backgroundSession.history
+      : []
+  );
+
+  const [completedQuestionIds, setCompletedQuestionIds] = useState<Set<string>>(() => {
+    // Restore from background session if available
+    if (backgroundSession && backgroundSession.lessonId === activeLessonId && backgroundSession.completedQuestionIds) {
+      return new Set(backgroundSession.completedQuestionIds);
+    }
+    return new Set();
+  });
+  const [starterResults, setStarterResults] = useState<boolean[]>(() => {
+    // Restore from background session if available
+    if (backgroundSession && backgroundSession.lessonId === activeLessonId && backgroundSession.starterResults) {
+      return backgroundSession.starterResults;
+    }
+    return [];
+  });
 
   const [phase, setPhase] = useState<'starter' | 'video' | 'question' | 'exit' | 'complete'>(() => {
     if (backgroundSession && backgroundSession.lessonId === activeLessonId) {
+      // If minimized during a question, pendingQuestionId will handle restoring it
+      // Start in video phase but useEffect will set it to question with the pending question
+      if (backgroundSession.phase === 'question' && backgroundSession.pendingQuestionId) {
+        return 'video'; // Temporarily video, useEffect will switch to question
+      }
       return backgroundSession.phase;
     }
     if (lesson && lesson.starters && lesson.starters.length > 0) return 'starter';
@@ -42,11 +78,13 @@ export const Player: React.FC = () => {
   const [sessionResult, setSessionResult] = useState<LessonResult | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [fullscreenInterrupted, setFullscreenInterrupted] = useState(false);
+  const [isSaving, setIsSaving] = useState(false); // Add loading state for save
 
   // Refs to avoid re-running init effect when phase/completedQuestionIds change
   const phaseRef = useRef(phase);
   const completedQuestionIdsRef = useRef(completedQuestionIds);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const playerContainerRef = useRef<HTMLDivElement>(null);
   const cueProcessingRef = useRef<Set<string>>(new Set()); // Track cues being processed to prevent duplicates
   const questionStartTimeRef = useRef<number | null>(null); // Track when current question started
   const phaseStartTimeRef = useRef<number>(Date.now()); // Track when phase started
@@ -71,13 +109,40 @@ export const Player: React.FC = () => {
     completedQuestionIdsRef.current = completedQuestionIds;
   }, [completedQuestionIds]);
 
+  // RESTORE PENDING QUESTION: If session was minimized during a question, restore it
+  // Only runs once on mount if there's a pending question
+  const pendingQuestionRestoredRef = useRef(false);
+  useEffect(() => {
+    // Only restore pending question once, and only if we're in video phase (not starter/exit)
+    if (
+      backgroundSession?.pendingQuestionId &&
+      lesson &&
+      !currentQuestion &&
+      !pendingQuestionRestoredRef.current &&
+      phase === 'video' // Only trigger from video phase
+    ) {
+      const pendingQ = lesson.questions.find(q => q.id === backgroundSession.pendingQuestionId);
+      if (pendingQ && !completedQuestionIds.has(pendingQ.id)) {
+        pendingQuestionRestoredRef.current = true; // Mark as restored
+        // Restore the question - child must answer before video continues
+        setPhase('question');
+        setCurrentQuestion(pendingQ);
+        questionStartTimeRef.current = Date.now();
+      }
+    }
+  }, [backgroundSession?.pendingQuestionId, lesson, currentQuestion, completedQuestionIds, phase]);
+
   // Cleanup function to stop video and destroy player
   const cleanupPlayer = useCallback(() => {
     const videoEl = videoRef.current;
     if (videoEl) {
+      // CRITICAL: Mute first to stop audio immediately
+      videoEl.muted = true;
       videoEl.pause();
+      // Clear the source to release audio resources
       videoEl.src = '';
       videoEl.load();
+      // Note: Don't remove from DOM - React manages the element lifecycle
     }
     if (playerInstance.current) {
       try {
@@ -94,45 +159,61 @@ export const Player: React.FC = () => {
     return () => {
       // Cleanup when component unmounts
       cleanupPlayer();
-      deleteLiveStatus();
+      if (user?.id) deleteLiveStatus(user.id);
     };
-  }, [cleanupPlayer]);
+  }, [cleanupPlayer, user?.id]);
 
-  // Prevent fullscreen exit during video phase
+  // Prevent fullscreen exit during video phase - PAUSE and NOTIFY PARENT
   useEffect(() => {
     const handleFullscreenChange = () => {
       if (!document.fullscreenElement && phase === 'video' && videoRef.current) {
+        // Child pressed Escape or exited fullscreen
         setFullscreenInterrupted(true);
         videoRef.current.pause();
+        videoRef.current.muted = true; // Mute audio immediately
+
+        // CRITICAL: Notify parent that child is paused/interrupted
+        if (user && lesson) {
+          const totalQuestions = (lesson.starters?.length || 0) + lesson.questions.length + (lesson.exits?.length || 0);
+          publishLiveStatus(user.id, lesson.id, {
+            mode: 'paused', // New mode to indicate paused state
+            t: getCurrentTimerValue(),
+            total: lesson.estimatedMinutes * 60,
+            qText: 'Video Paused (Fullscreen Exited)',
+            history: historyRef.current,
+            stats: {
+              starters: starterResults,
+              questionsAnswered: completedQuestionIds.size,
+              questionsTotal: totalQuestions,
+              starterCount: lesson.starters?.length || 0,
+              videoQuestionCount: lesson.questions.length,
+              exitCount: lesson.exits?.length || 0
+            }
+          });
+        }
       } else if (document.fullscreenElement && fullscreenInterrupted) {
         setFullscreenInterrupted(false);
+        if (videoRef.current) {
+          videoRef.current.muted = false; // Unmute when returning to fullscreen
+        }
       }
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, [phase, fullscreenInterrupted]);
+  }, [phase, fullscreenInterrupted, user, lesson, starterResults, completedQuestionIds]);
 
   // Initialize video player - only once per lesson
   useEffect(() => {
     if (!lesson || !videoRef.current) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initEffect:entry', message: 'Init effect entry', data: { hasLesson: !!lesson, hasVideoRef: !!videoRef.current, videoUrl: lesson?.video }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
       return;
     }
 
     // If player already exists and video source matches, don't re-initialize
     const videoEl = videoRef.current;
     if (playerInstance.current && (videoEl.src === lesson.video || videoEl.currentSrc === lesson.video)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initEffect:skip', message: 'Skipping init - player already exists with correct source', data: { videoSrc: videoEl.src, currentSrc: videoEl.currentSrc, expectedSrc: lesson.video }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
       return;
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initEffect:setSource', message: 'Setting video source', data: { videoUrl: lesson.video, currentSrc: videoEl.src, isFirebase: lesson.video.includes('firebasestorage') }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'C' }) }).catch(() => { });
-    // #endregion
     // Set video source
     // For Firebase Storage videos, use 'auto' preload to ensure full video loads
     videoEl.src = lesson.video;
@@ -161,9 +242,6 @@ export const Player: React.FC = () => {
             autoplay: false,
           });
           playerInstance.current = player;
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initPlyr:created', message: 'Plyr instance created', data: { videoSrc: videoEl.src, currentSrc: videoEl.currentSrc }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }) }).catch(() => { });
-          // #endregion
 
           // Restore background session if exists
           if (backgroundSession && backgroundSession.lessonId === lesson.id) {
@@ -178,9 +256,6 @@ export const Player: React.FC = () => {
 
       initPlyr();
     } else {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initNative:skippingPlyr', message: 'Skipping Plyr - using native video player', data: { videoSrc: videoEl.src, currentSrc: videoEl.currentSrc }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }) }).catch(() => { });
-      // #endregion
 
       // Restore background session if exists (for native player)
       if (backgroundSession && backgroundSession.lessonId === lesson.id) {
@@ -189,14 +264,8 @@ export const Player: React.FC = () => {
         }, { once: true });
       }
 
-      // Log video element dimensions after source is set
       videoEl.addEventListener('loadedmetadata', () => {
-        // #region agent log
-        const videoStyles = window.getComputedStyle(videoEl);
-        const containerEl = videoContainerRef.current;
-        const containerStyles = containerEl ? window.getComputedStyle(containerEl) : null;
-        fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:initNative:loadedmetadata', message: 'Native video loaded metadata', data: { videoWidth: videoEl.offsetWidth, videoHeight: videoEl.offsetHeight, videoClientWidth: videoEl.clientWidth, videoClientHeight: videoEl.clientHeight, videoVideoWidth: videoEl.videoWidth, videoVideoHeight: videoEl.videoHeight, containerWidth: containerEl?.offsetWidth, containerHeight: containerEl?.offsetHeight, videoDisplay: videoStyles.display, videoVisibility: videoStyles.visibility, videoOpacity: videoStyles.opacity, containerDisplay: containerStyles?.display }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }) }).catch(() => { });
-        // #endregion
+        // Dimensions log can stay but without fetch
       }, { once: true });
     }
 
@@ -207,11 +276,6 @@ export const Player: React.FC = () => {
       const t = videoEl.currentTime;
       setCurrentTime(t);
 
-      // #region agent log
-      if (t > 0 && t < 3) {
-        fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:onTimeUpdate:early', message: 'Time update in first 3 seconds', data: { currentTime: t, phase: phaseRef.current, paused: videoEl.paused, readyState: videoEl.readyState, allQuestionTimes: lesson.questions.map(q => ({ id: q.id, time: q.time || 0 })), completedIds: Array.from(completedQuestionIdsRef.current) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-      }
-      // #endregion
 
       if (phaseRef.current === 'video') {
         const cue = lesson.questions.find(q =>
@@ -224,9 +288,6 @@ export const Player: React.FC = () => {
           cueProcessingRef.current.add(cue.id);
           // Track when question started
           questionStartTimeRef.current = Date.now();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:onTimeUpdate:cueFound', message: 'Question cue detected - pausing video', data: { currentTime: t, cueTime: cue.time || 0, cueId: cue.id, questionPrompt: cue.prompt }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-          // #endregion
           videoEl.pause();
           setPhase('question');
           setCurrentQuestion(cue);
@@ -238,16 +299,10 @@ export const Player: React.FC = () => {
 
     // Store event handlers so they can be properly removed
     const onPlay = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:play', message: 'Video play event fired', data: { currentTime: videoEl.currentTime, readyState: videoEl.readyState, phase: phaseRef.current, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,E' }) }).catch(() => { });
-      // #endregion
       setIsPlaying(true);
     };
 
     const onPause = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:pause', message: 'Video pause event fired', data: { currentTime: videoEl.currentTime, phase: phaseRef.current, readyState: videoEl.readyState, ended: videoEl.ended, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,B' }) }).catch(() => { });
-      // #endregion
       setIsPlaying(false);
     };
 
@@ -258,16 +313,10 @@ export const Player: React.FC = () => {
     };
 
     const onLoadedMetadata = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:loadedmetadata', message: 'Video metadata loaded', data: { duration: videoEl.duration, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
       setDuration(videoEl.duration);
     };
 
     const onCanPlay = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:canplay', message: 'Video canplay event fired', data: { readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,C' }) }).catch(() => { });
-      // #endregion
       if (videoEl.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA) {
         setIsVideoReady(true);
       }
@@ -278,29 +327,16 @@ export const Player: React.FC = () => {
     };
 
     const onError = (e: Event) => {
-      // #region agent log
-      const error = videoEl.error;
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:error', message: 'Video error event fired', data: { errorCode: error?.code, errorMessage: error?.message, networkState: videoEl.networkState, readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
-      console.error('Video error:', error);
+      console.error('Video error:', videoEl.error);
     };
 
     const onStalled = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:stalled', message: 'Video stalled event fired', data: { currentTime: videoEl.currentTime, networkState: videoEl.networkState, readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
     };
 
     const onWaiting = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:waiting', message: 'Video waiting event fired', data: { currentTime: videoEl.currentTime, networkState: videoEl.networkState, readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
     };
 
     const onSuspend = () => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:event:suspend', message: 'Video suspend event fired', data: { currentTime: videoEl.currentTime, networkState: videoEl.networkState, readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'C' }) }).catch(() => { });
-      // #endregion
     };
 
     // Add event listeners
@@ -337,22 +373,13 @@ export const Player: React.FC = () => {
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl || !lesson) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:entry', message: 'Phase transition effect entry', data: { phase, hasVideoEl: !!videoEl, hasLesson: !!lesson }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,B,C,D,E,F' }) }).catch(() => { });
-      // #endregion
       return;
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:state', message: 'Video element state before phase check', data: { phase, src: videoEl.src, currentSrc: videoEl.currentSrc, readyState: videoEl.readyState, networkState: videoEl.networkState, paused: videoEl.paused, hasPlyr: !!playerInstance.current }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,C,F' }) }).catch(() => { });
-    // #endregion
 
     if (phase === 'video') {
       // When entering video phase, resume playback from current position
       // Don't restart - just resume if paused
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:videoPhase', message: 'Entering video phase', data: { paused: videoEl.paused, isVideoReady, readyState: videoEl.readyState, src: videoEl.src, currentSrc: videoEl.currentSrc }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,C,F' }) }).catch(() => { });
-      // #endregion
 
       if (videoEl.paused) {
         // Request fullscreen non-blocking (don't wait for it)
@@ -362,53 +389,15 @@ export const Player: React.FC = () => {
 
         // Attempt to play - check if video is ready
         const attemptPlay = () => {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:attemptPlay', message: 'Attempting to play video', data: { isVideoReady, readyState: videoEl.readyState, src: videoEl.currentSrc || videoEl.src }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,C' }) }).catch(() => { });
-          // #endregion
 
           videoEl.play().then(() => {
-            // #region agent log
-            const videoStyles = window.getComputedStyle(videoEl);
-            const containerEl = videoEl.parentElement;
-            const containerStyles = containerEl ? window.getComputedStyle(containerEl) : null;
-            // Find our actual container div (not Plyr's wrapper)
-            let ourContainer = containerEl;
-            while (ourContainer && !ourContainer.className.includes('relative w-full h-full')) {
-              ourContainer = ourContainer.parentElement;
-            }
-            const ourContainerStyles = ourContainer ? window.getComputedStyle(ourContainer) : null;
-            const videoContainerEl = videoContainerRef.current;
-            const videoContainerStyles = videoContainerEl ? window.getComputedStyle(videoContainerEl) : null;
-            fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:playSuccess', message: 'video.play() succeeded', data: { paused: videoEl.paused, currentTime: videoEl.currentTime, readyState: videoEl.readyState, phase: phaseRef.current, videoDisplay: videoStyles.display, videoVisibility: videoStyles.visibility, videoOpacity: videoStyles.opacity, videoWidth: videoEl.offsetWidth, videoHeight: videoEl.offsetHeight, videoClientWidth: videoEl.clientWidth, videoClientHeight: videoEl.clientHeight, videoScrollWidth: videoEl.scrollWidth, videoScrollHeight: videoEl.scrollHeight, containerDisplay: containerStyles?.display, ourContainerDisplay: ourContainerStyles?.display, ourContainerVisibility: ourContainerStyles?.visibility, ourContainerWidth: ourContainer?.offsetWidth, ourContainerHeight: ourContainer?.offsetHeight, ourContainerClass: ourContainer?.className, videoContainerDisplay: videoContainerStyles?.display, videoContainerVisibility: videoContainerStyles?.visibility, videoContainerWidth: videoContainerEl?.offsetWidth, videoContainerHeight: videoContainerEl?.offsetHeight }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'E' }) }).catch(() => { });
-            // #endregion
             // Verify video is actually playing after a short delay
             setTimeout(() => {
-              // #region agent log
-              const videoStyles2 = window.getComputedStyle(videoEl);
-              let ourContainer2 = videoEl.parentElement;
-              while (ourContainer2 && !ourContainer2.className.includes('relative w-full h-full')) {
-                ourContainer2 = ourContainer2.parentElement;
-              }
-              const ourContainerStyles2 = ourContainer2 ? window.getComputedStyle(ourContainer2) : null;
-              fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:playVerify', message: 'Verifying video is still playing', data: { paused: videoEl.paused, currentTime: videoEl.currentTime, readyState: videoEl.readyState, phase: phaseRef.current, ended: videoEl.ended, videoDisplay: videoStyles2.display, videoVisibility: videoStyles2.visibility, videoOpacity: videoStyles2.opacity, videoWidth: videoEl.offsetWidth, videoHeight: videoEl.offsetHeight, ourContainerDisplay: ourContainerStyles2?.display, ourContainerVisibility: ourContainerStyles2?.visibility, ourContainerClass: ourContainer2?.className }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,B' }) }).catch(() => { });
-              // #endregion
             }, 500);
             // Check again after 1.5 seconds (when user reports visual stops)
             setTimeout(() => {
-              // #region agent log
-              const videoStyles3 = window.getComputedStyle(videoEl);
-              let ourContainer3 = videoEl.parentElement;
-              while (ourContainer3 && !ourContainer3.className.includes('relative w-full h-full')) {
-                ourContainer3 = ourContainer3.parentElement;
-              }
-              const ourContainerStyles3 = ourContainer3 ? window.getComputedStyle(ourContainer3) : null;
-              fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:playVerify1_5s', message: 'Verifying video at 1.5s (when visual stops)', data: { paused: videoEl.paused, currentTime: videoEl.currentTime, readyState: videoEl.readyState, phase: phaseRef.current, ended: videoEl.ended, videoDisplay: videoStyles3.display, videoVisibility: videoStyles3.visibility, videoOpacity: videoStyles3.opacity, videoWidth: videoEl.offsetWidth, videoHeight: videoEl.offsetHeight, ourContainerDisplay: ourContainerStyles3?.display, ourContainerVisibility: ourContainerStyles3?.visibility, ourContainerClass: ourContainer3?.className, hasPlyr: !!playerInstance.current }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,B' }) }).catch(() => { });
-              // #endregion
             }, 1500);
           }).catch((err) => {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:playFailed', message: 'video.play() failed', data: { error: err?.message || String(err), name: err?.name, readyState: videoEl.readyState, phase: phaseRef.current }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'E' }) }).catch(() => { });
-            // #endregion
             console.warn('Autoplay failed, user can click play button:', err);
           });
         };
@@ -417,14 +406,8 @@ export const Player: React.FC = () => {
         if (isVideoReady || videoEl.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA) {
           attemptPlay();
         } else {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:waitForReady', message: 'Waiting for video to be ready', data: { isVideoReady, readyState: videoEl.readyState }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,F' }) }).catch(() => { });
-          // #endregion
           // Wait for video to be ready
           const onCanPlayHandler = () => {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:canPlay', message: 'Video can play event fired in phase effect', data: { readyState: videoEl.readyState }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'A,F' }) }).catch(() => { });
-            // #endregion
             videoEl.removeEventListener('canplay', onCanPlayHandler);
             attemptPlay();
           };
@@ -439,9 +422,6 @@ export const Player: React.FC = () => {
     } else if (phase === 'question' || phase === 'starter' || phase === 'exit') {
       // Pause video during questions/starter/exit
       if (!videoEl.paused) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:phaseEffect:pause', message: 'Pausing video for non-video phase', data: { phase, currentTime: videoEl.currentTime, readyState: videoEl.readyState }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,B' }) }).catch(() => { });
-        // #endregion
         videoEl.pause();
       }
     }
@@ -474,28 +454,33 @@ export const Player: React.FC = () => {
       // Calculate total questions (starters + video + exits)
       const totalQuestions = (lesson.starters?.length || 0) + lesson.questions.length + (lesson.exits?.length || 0);
 
-      publishLiveStatus(lesson.id, {
-        mode: phase,
-        t: getCurrentTimerValue(), // Use calculated timer value
-        total: lesson.estimatedMinutes * 60,
-        qText: currentQuestion?.prompt || null,
-        history: historyRef.current,
-        stats: {
-          starters: starterResults,
-          questionsAnswered: completedQuestionIds.size,
-          questionsTotal: totalQuestions,
-          starterCount: lesson.starters?.length || 0,
-          videoQuestionCount: lesson.questions.length,
-          exitCount: lesson.exits?.length || 0
-        }
-      }, controller.signal);
+      if (user) {
+        // Determine current mode - include paused state
+        const currentMode = fullscreenInterrupted ? 'paused' : phase;
+
+        publishLiveStatus(user.id, lesson.id, {
+          mode: currentMode, // Use currentMode which includes 'paused' state
+          t: getCurrentTimerValue(), // Use calculated timer value
+          total: lesson.estimatedMinutes * 60,
+          qText: currentQuestion?.prompt || null,
+          history: historyRef.current,
+          stats: {
+            starters: starterResults,
+            questionsAnswered: completedQuestionIds.size,
+            questionsTotal: totalQuestions,
+            starterCount: lesson.starters?.length || 0,
+            videoQuestionCount: lesson.questions.length,
+            exitCount: lesson.exits?.length || 0
+          }
+        }, controller.signal);
+      }
     }, 1000); // Changed from 3000ms to 1000ms for live updates
 
     return () => {
       clearInterval(heartbeat);
       controller.abort();
     };
-  }, [lesson, phase, currentTime, currentQuestion, completedQuestionIds, starterResults]);
+  }, [lesson, phase, currentTime, currentQuestion, completedQuestionIds, starterResults, fullscreenInterrupted]);
 
   const recordAnswer = (q: Question, isCorrect: boolean, phase: 'starter' | 'video' | 'exit', answer: string | string[], questionDurationSeconds?: number) => {
     // Check if already recorded to prevent duplicate submissions
@@ -519,41 +504,80 @@ export const Player: React.FC = () => {
     const totalQuestions = (lesson?.starters?.length || 0) + (lesson?.questions.length || 0) + (lesson?.exits?.length || 0);
 
     // Immediately publish live status with updated history
-    publishLiveStatus(lesson?.id || '', {
-      mode: phase,
-      t: getCurrentTimerValue(), // Use calculated timer value
-      history: historyRef.current,
-      stats: {
-        starters: starterResults,
-        questionsAnswered: newCompletedIds.size,
-        questionsTotal: totalQuestions,
-        starterCount: lesson?.starters?.length || 0,
-        videoQuestionCount: lesson?.questions.length || 0,
-        exitCount: lesson?.exits?.length || 0
-      }
-    });
+    if (user) {
+      publishLiveStatus(user.id, lesson?.id || '', {
+        mode: phase,
+        t: getCurrentTimerValue(), // Use calculated timer value
+        history: historyRef.current,
+        stats: {
+          starters: starterResults,
+          questionsAnswered: newCompletedIds.size,
+          questionsTotal: totalQuestions,
+          starterCount: lesson?.starters?.length || 0,
+          videoQuestionCount: lesson?.questions.length || 0,
+          exitCount: lesson?.exits?.length || 0
+        }
+      });
+    }
   };
 
   const handleMinimize = () => {
     if (!lesson) return;
+
+    // Flag to prevent remote kill listener from firing during minimize
+    isSessionEndingRef.current = true;
+
+    // CRITICAL: Pause and cleanup video FIRST
+    const videoEl = videoRef.current;
+    const savedTime = videoEl ? videoEl.currentTime : currentTime;
+    if (videoEl) {
+      videoEl.pause();
+    }
+    cleanupPlayer();
+
+    // Now save the session with the captured time
     const session: BackgroundSession = {
       lessonId: lesson.id,
-      currentTime: videoRef.current ? videoRef.current.currentTime : currentTime,
+      currentTime: savedTime,
       totalDuration: duration || lesson.estimatedMinutes * 60,
       history: historyRef.current,
       completedQuestionIds: Array.from(completedQuestionIds),
       starterResults: starterResults,
       phase: phase,
-      startTimestamp: sessionStartRef.current
+      startTimestamp: sessionStartRef.current,
+      pendingQuestionId: phase === 'question' ? currentQuestion?.id : undefined // Save question to resume
     };
+
+    // CRITICAL: Update live session to 'minimized' mode (don't delete it)
+    // Parent will see the session is minimized until child resumes or parent clears it
+    if (user) {
+      const totalQuestions = (lesson.starters?.length || 0) + lesson.questions.length + (lesson.exits?.length || 0);
+      publishLiveStatus(user.id, lesson.id, {
+        mode: 'minimized',
+        t: savedTime,
+        total: lesson.estimatedMinutes * 60,
+        qText: 'Session Minimized by Parent',
+        history: historyRef.current,
+        stats: {
+          starters: starterResults,
+          questionsAnswered: completedQuestionIds.size,
+          questionsTotal: totalQuestions,
+          starterCount: lesson.starters?.length || 0,
+          videoQuestionCount: lesson.questions.length,
+          exitCount: lesson.exits?.length || 0
+        }
+      });
+    }
+
     minimizeSession(session);
   };
 
-  const handleEndSession = (forceIncomplete: boolean = false, statusOverride?: 'completed') => {
-    if (!lesson) return;
+  const handleEndSession = async (forceIncomplete: boolean = false, statusOverride?: 'completed') => {
+    if (!lesson || isSaving) return; // Prevent double submission
 
     // Flag to stop any more heartbeats
     isSessionEndingRef.current = true;
+    setIsSaving(true);
 
     // Stop video playback
     cleanupPlayer();
@@ -573,37 +597,49 @@ export const Player: React.FC = () => {
       xpEarned: 0
     };
 
-    saveLessonResult(result);
-    if (isFinished) {
-      setSessionResult(result);
-      setPhase('complete');
-    } else {
-      exitToDashboard();
+    try {
+      await saveLessonResult(result);
+      if (isFinished) {
+        setSessionResult(result);
+        setPhase('complete');
+      } else {
+        exitToDashboard();
+      }
+    } catch (error) {
+      console.error("Error saving session:", error);
+      alert("There was an issue saving your progress. Please check your connection and try again.");
+      setIsSaving(false);
+      isSessionEndingRef.current = false; // Allow retry
     }
   };
 
-  const exitToDashboard = () => {
+  const exitToDashboard = useCallback(() => {
     isSessionEndingRef.current = true;
     // Stop video and cleanup
     cleanupPlayer();
-    deleteLiveStatus();
+    if (user?.id) deleteLiveStatus(user.id);
     setActiveLessonId(null);
-    setView(ViewState.CHILD_DASHBOARD);
-  };
+    navigate('/child');
+  }, [cleanupPlayer, user?.id, setActiveLessonId, navigate]);
 
-  // Listener for remote session termination (e.g. deletion from Supabase)
+  // Listener for remote session termination (e.g. deletion from Supabase by parent)
+  // NOTE: Only triggers on actual parent-initiated remote stop, not during minimize
   useEffect(() => {
-    if (!lesson) return;
+    if (!lesson || !user?.id) return;
 
-    const channel = supabase.channel('player-remote-kill')
+    const channel = supabase.channel(`remote-kill-${user.id}`)
       .on('postgres_changes', {
         event: 'DELETE',
         schema: 'public',
         table: 'live_sessions',
-        filter: `profile_id=eq.${DEMO_PROFILE_ID}`
+        filter: `profile_id=eq.${user.id}`
       }, () => {
-        // If the session row is deleted remotely, exit the player
-        console.log("Remote session deletion detected. Exiting...");
+        // Ignore if we're already intentionally ending the session
+        if (isSessionEndingRef.current) {
+          console.log("Ignoring remote termination - session already ending.");
+          return;
+        }
+        console.log("Remote session termination detected.");
         exitToDashboard();
       })
       .subscribe();
@@ -611,23 +647,12 @@ export const Player: React.FC = () => {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [lesson]); // exitToDashboard is stable per render (recreated) but harmless to omit or include if useCallback'd. It's not useCallback'd currently.
-  // Ideally, add exitToDashboard to deps if we want strict linting, but it causes re-subscription on ever render.
-  // Better: Wrap exitToDashboard in useCallback earlier.
-  // For now, I will omit it from deps to avoid infinite loops/re-subs, as 'lesson' is the main stable identifier.
-  // Actually, 'exitToDashboard' closes over 'setActiveLessonId', 'setView' etc which are from context and likely stable.
-  // But 'exitToDashboard' itself is a new function every render.
-  // So adding it to deps resets the channel every render -> BAD.
-  // I will LEAVE IT OUT of deps for now, or wrap it in a ref.
-  // The "correct" react way: wrapping exitToDashboard in useCallback.
-  // I will just execute the insertion without refactoring exitToDashboard to minimize diff noise, assuming 'lesson' change is the major lifecycle event.
-  // Actually, `lesson` object reference might change if `availableLessons` refreshes. `lesson.id` is better.
-  // I'll use `[lesson?.id]` in deps.
+  }, [lesson?.id, user?.id, exitToDashboard]);
 
   const requestFullscreen = async () => {
-    if (videoRef.current?.parentElement) {
+    if (playerContainerRef.current) {
       try {
-        await videoRef.current.parentElement.requestFullscreen();
+        await playerContainerRef.current.requestFullscreen();
       } catch (e) {
         // Fullscreen may fail, continue anyway
       }
@@ -654,20 +679,19 @@ export const Player: React.FC = () => {
   }, []);
 
   const handleStarterComplete = useCallback(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:starterComplete', message: 'Starter questions completed, transitioning to video', data: { videoUrl: lesson?.video }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A,F' }) }).catch(() => { });
-    // #endregion
     setPhase('video');
   }, [lesson?.video]);
 
   const handleExitComplete = useCallback(() => {
     handleEndSession(false, 'completed');
-  }, []);
+  }, [handleEndSession]);
 
   if (!lesson) return <div className="min-h-screen bg-black flex items-center justify-center text-white">Loading from Cloud...</div>;
 
+  if (isSaving) return <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white gap-4"><div className="w-8 h-8 border-4 border-scholafy-accent border-t-transparent rounded-full animate-spin"></div><div className="text-lg font-bold">Saving Progress...</div></div>;
+
   return (
-    <div className="fixed inset-0 bg-black flex flex-col font-sans text-white z-0">
+    <div ref={playerContainerRef} className="fixed inset-0 bg-black flex flex-col font-sans text-white z-0">
       <div className="absolute top-4 left-4 z-[150]">
         <button onClick={() => setShowParentLock(true)} className="w-10 h-10 flex items-center justify-center bg-black/20 hover:bg-black/60 text-white rounded-full border border-white/10 backdrop-blur-md shadow-lg">🔒</button>
       </div>
@@ -746,11 +770,64 @@ export const Player: React.FC = () => {
       )}
 
       {phase === 'complete' && sessionResult && (
-        <div className="absolute inset-0 z-50 bg-[#0b1527] flex flex-col items-center justify-center p-6 text-center">
-          <div className="text-8xl mb-4">🏆</div>
-          <h1 className="text-4xl font-bold mb-2">Lesson Mastery!</h1>
-          <div className="text-scholafy-accent font-bold text-xl mb-8">Score: {sessionResult.scorePercent}%</div>
-          <Button onClick={exitToDashboard}>Return to Dashboard</Button>
+        <div className="absolute inset-0 z-50 bg-[#0b1527] flex flex-col items-center justify-center p-6 text-center animate-in fade-in zoom-in duration-500 overflow-y-auto">
+          <div className="absolute top-0 right-0 p-20 bg-scholafy-accent/5 rounded-full blur-[100px] pointer-events-none"></div>
+          <div className="absolute bottom-0 left-0 p-20 bg-blue-500/5 rounded-full blur-[100px] pointer-events-none"></div>
+
+          <div className="mb-8 relative">
+            <div className="text-8xl mb-4 animate-bounce">
+              {sessionResult.scorePercent >= 90 ? '💎' : sessionResult.scorePercent >= 65 ? '🥇' : sessionResult.scorePercent >= 35 ? '🛡️' : '🔑'}
+            </div>
+            <div className="text-scholafy-accent font-black tracking-widest text-sm uppercase mb-2">
+              {sessionResult.scorePercent >= 90 ? 'The Diamond Crown' : sessionResult.scorePercent >= 65 ? 'The Gold Medal' : sessionResult.scorePercent >= 35 ? 'The Silver Shield' : 'The Bronze Key'}
+            </div>
+          </div>
+
+          <h1 className="text-4xl md:text-5xl font-bold mb-2 tracking-tight">Lesson Mastered!</h1>
+          <div className="text-white/60 text-lg mb-8">"{lesson.title}"</div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-10 w-full max-w-lg">
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-md">
+              <div className="text-xs text-scholafy-muted uppercase tracking-widest font-bold mb-1">Final Score</div>
+              <div className="text-4xl font-bold text-scholafy-accent">{sessionResult.scorePercent}%</div>
+            </div>
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-md">
+              <div className="text-xs text-scholafy-muted uppercase tracking-widest font-bold mb-1">XP Earned</div>
+              <div className="text-4xl font-bold text-white">+{sessionResult.xpEarned}</div>
+            </div>
+          </div>
+
+          {sessionResult.badgesEarned && sessionResult.badgesEarned.length > 0 && (
+            <div className="mb-10 w-full max-w-lg">
+              <div className="text-xs text-scholafy-muted uppercase tracking-widest font-bold mb-6 flex items-center justify-center gap-2">
+                <span className="w-8 h-px bg-white/10"></span>
+                Badges Unlocked
+                <span className="w-8 h-px bg-white/10"></span>
+              </div>
+              <div className="flex flex-wrap justify-center gap-6">
+                {sessionResult.badgesEarned.map(badge => (
+                  <div key={badge.id} className="flex flex-col items-center gap-2 group">
+                    <div className={`w-20 h-20 rounded-2xl ${badge.color} flex items-center justify-center text-4xl shadow-2xl transform transition-transform group-hover:scale-110 duration-300 ring-2 ring-white/20`}>
+                      {badge.icon}
+                    </div>
+                    <div className="text-xs font-bold text-white tracking-wide">{badge.name}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-4 w-full max-w-xs">
+            <Button size="lg" fullWidth onClick={exitToDashboard}>Return to Dashboard</Button>
+            {sessionResult.scorePercent < 100 && (
+              <button
+                onClick={() => window.location.reload()}
+                className="text-scholafy-muted hover:text-white text-sm font-bold uppercase tracking-widest transition-colors py-2"
+              >
+                Try Again for 100%
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -786,9 +863,6 @@ const QuestionHost: React.FC<{ question: Question, onComplete: () => void, onRes
   }, [onComplete, onResult]);
 
   useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:QuestionHost:effect', message: 'QuestionHost effect running', data: { questionId: question?.id, hasContainer: !!containerRef.current, hasRendered: hasRenderedRef.current === question?.id, isRendering: isRenderingRef.current }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-    // #endregion
 
     // Early return if already rendered, currently rendering, or no container/question
     if (hasRenderedRef.current === question?.id || isRenderingRef.current || !containerRef.current || !question) {
@@ -798,17 +872,11 @@ const QuestionHost: React.FC<{ question: Question, onComplete: () => void, onRes
     // Mark as rendering to prevent concurrent renders
     isRenderingRef.current = true;
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:QuestionHost:renderQuestion', message: 'Rendering question', data: { questionId: question.id, questionPrompt: question.prompt }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-    // #endregion
 
     // Mark as rendered BEFORE calling renderQuestion to prevent race conditions
     hasRenderedRef.current = question.id;
 
     renderQuestion(containerRef.current, question, (isCorrect, answer) => {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:QuestionHost:answer', message: 'Question answered', data: { questionId: question.id, isCorrect, answer }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-      // #endregion
 
       const duration = questionStartTime ? Math.floor((Date.now() - questionStartTime) / 1000) : 0;
       if (onResultRef.current) onResultRef.current(isCorrect, answer, duration);
@@ -841,11 +909,6 @@ const ShellQuiz: React.FC<{ type: 'starter' | 'exit', questions: Question[], onC
   const [transitioning, setTransitioning] = useState(false);
   const questionStartTimeRef = useRef<number>(Date.now()); // Track when current question started
 
-  // #region agent log
-  useEffect(() => {
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:ShellQuiz:render', message: 'ShellQuiz rendered', data: { type, questionsCount: questions?.length || 0, currentIndex: index, currentQuestionId: questions?.[index]?.id }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-  }, [type, questions, index]);
-  // #endregion
 
   useEffect(() => {
     if (!questions || questions.length === 0) {
@@ -866,9 +929,6 @@ const ShellQuiz: React.FC<{ type: 'starter' | 'exit', questions: Question[], onC
   const currentQ = questions[index];
 
   const handleStepComplete = useCallback(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/44ab138b-df5a-400b-9117-e127cb5c4a45', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'Player.tsx:ShellQuiz:handleStepComplete', message: 'Step complete handler called', data: { currentIndex: index, totalQuestions: questions.length, questionId: currentQ.id }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run2', hypothesisId: 'A' }) }).catch(() => { });
-    // #endregion
     if (index < questions.length - 1) {
       setTransitioning(true);
       setTimeout(() => {

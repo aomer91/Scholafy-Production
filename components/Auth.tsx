@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 
 export const Auth = () => {
+    const navigate = useNavigate();
     const [loading, setLoading] = useState(false);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -35,6 +37,7 @@ export const Auth = () => {
                     password,
                 });
                 if (error) throw error;
+                navigate('/select-profile');
             }
         } catch (error: any) {
             setMessage({ type: 'error', text: error.message || 'An error occurred' });

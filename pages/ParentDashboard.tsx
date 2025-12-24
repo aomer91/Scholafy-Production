@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { Button } from '../components/Button';
-import { ViewState, LiveStatus, LessonResult, QuestionRecord, Lesson, SubjectStats } from '../types';
+import { LiveStatus, LessonResult, QuestionRecord, Lesson, SubjectStats } from '../types';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 
@@ -65,7 +66,7 @@ const LiveQuestionFeed: React.FC<{ history: QuestionRecord[] }> = ({ history }) 
     const videoQuestions = history.filter(rec => rec.phase === 'video');
     const exitQuestions = history.filter(rec => rec.phase === 'exit');
 
-    const formatAnswer = (answer: string | string[] | undefined, isCorrect: boolean): JSX.Element | string => {
+    const formatAnswer = (answer: string | string[] | undefined, isCorrect: boolean): React.ReactNode => {
         if (!answer) return <span className="text-scholafy-muted italic">No answer submitted</span>;
 
         // Check if it's a match question answer (format: "left → right")
@@ -181,7 +182,7 @@ const LiveSessionDetail: React.FC<{ data: LiveStatus; lessonTitle: string }> = (
 
     // Smooth timer increment for non-video phases (question/starter/exit)
     useEffect(() => {
-        if (data.mode === 'idle' || data.mode === 'complete') return;
+        if (data.mode === 'idle' || data.mode === 'complete' || data.mode === 'paused' || data.mode === 'minimized') return;
 
         // For video mode, rely on data.t updates from heartbeat
         // For other modes, increment locally for smooth display
@@ -221,10 +222,24 @@ const LiveSessionDetail: React.FC<{ data: LiveStatus; lessonTitle: string }> = (
                             {Math.floor((liveTimer || 0) / 60)}:{(liveTimer || 0) % 60 < 10 ? '0' : ''}{Math.floor((liveTimer || 0) % 60)}
                         </div>
                         <div className="text-[10px] text-scholafy-muted uppercase">
-                            {data.mode === 'video' ? 'Video Time' : data.mode === 'question' ? 'Question Time' : 'Session Timer'}
+                            {data.mode === 'minimized' ? '⏸️ MINIMIZED' : data.mode === 'paused' ? '⚠️ PAUSED' : data.mode === 'video' ? 'Video Time' : data.mode === 'question' ? 'Question Time' : 'Session Timer'}
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <div className="mb-6 flex flex-wrap gap-3">
+                <button
+                    onClick={async () => {
+                        if (confirm("Remote Stop? This will return the student to their dashboard immediately.")) {
+                            await supabase.from('live_sessions').delete().eq('profile_id', data.profileId);
+                        }
+                    }}
+                    className="flex-1 py-3 px-6 bg-red-600/20 hover:bg-red-600/30 border border-red-500/30 rounded-xl text-red-100 font-bold transition-all flex items-center justify-center gap-2 group shadow-lg"
+                >
+                    <span className="text-xl group-hover:scale-125 transition-transform">🛑</span>
+                    <span>Remote Stop Session</span>
+                </button>
             </div>
 
             {showDebug && (
@@ -292,21 +307,216 @@ const LiveSessionDetail: React.FC<{ data: LiveStatus; lessonTitle: string }> = (
     );
 };
 
-const TeacherFeedbackCard: React.FC<{ result: LessonResult, lesson?: Lesson }> = ({ result, lesson }) => {
-    const score = result.scorePercent;
-    let feedback = "";
-    if (result.status === 'incomplete') feedback = "Session ended early. Recommend re-assignment.";
-    else if (score >= 90) feedback = `High proficiency in ${lesson?.title}. Mastery confirmed.`;
-    else if (score >= 70) feedback = "Concepts secure. Minor application errors observed.";
-    else if (score >= 50) feedback = "Partial understanding. Review formative cues.";
-    else feedback = "Foundational misconceptions identified. Intervention recommended.";
+const DiagnosticReportCard: React.FC<{ result: LessonResult, lesson?: Lesson }> = ({ result, lesson }) => {
+    // If legacy data, fallback to basic calculation or defaults
+    const effortGrade = result.effortGrade || 'C';
+    const focusIndex = result.focusIndex || 70;
+    const masteryLevel = result.masteryLevel || 'WTS';
+    const note = result.insightText || "Analysis pending for this session. Please check back later.";
+
+    const getGradeColor = (g: string) => {
+        if (g.startsWith('A')) return 'text-green-400 border-green-500/50 bg-green-500/10';
+        if (g.startsWith('B')) return 'text-blue-400 border-blue-500/50 bg-blue-500/10';
+        if (g.startsWith('C')) return 'text-yellow-400 border-yellow-500/50 bg-yellow-500/10';
+        return 'text-red-400 border-red-500/50 bg-red-500/10';
+    };
+
+    const getMasteryBadget = (m: string) => {
+        const config = {
+            'GDS': { label: 'Greater Depth', color: 'bg-purple-500 text-white' },
+            'EXS': { label: 'Expected Standard', color: 'bg-green-500 text-scholafy-navy' },
+            'WTS': { label: 'Working Towards', color: 'bg-yellow-500 text-scholafy-navy' },
+            'PK': { label: 'Foundations', color: 'bg-red-500 text-white' }
+        }[m] || { label: 'Assessing...', color: 'bg-gray-500' };
+
+        return <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest ${config.color}`}>{config.label}</span>;
+    };
 
     return (
-        <div className="bg-blue-900/10 border border-blue-500/20 p-6 rounded-xl relative overflow-hidden">
-            <h3 className="text-blue-400 font-bold uppercase tracking-widest text-xs mb-3 flex items-center gap-2">
-                <span>🤖</span> Teacher Report
-            </h3>
-            <p className="text-lg leading-relaxed text-blue-100 font-medium italic">"{feedback}"</p>
+        <div className="bg-[#0b1527] border border-white/20 rounded-2xl overflow-hidden shadow-2xl">
+            {/* Header / Teacher Note */}
+            <div className="p-6 md:p-8 bg-gradient-to-br from-blue-900/20 to-purple-900/20 border-b border-white/10">
+                <div className="flex justify-between items-start mb-4">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-scholafy-accent flex items-center justify-center text-scholafy-navy text-xl shadow-lg">🤖</div>
+                        <div>
+                            <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted">AI Teacher Insight</div>
+                            <h3 className="font-bold text-white text-lg">Diagnostic Report</h3>
+                        </div>
+                    </div>
+                    {getMasteryBadget(masteryLevel)}
+                </div>
+                <p className="text-lg md:text-xl font-medium text-blue-100 leading-relaxed italic">"{note}"</p>
+            </div>
+
+            {/* Diagnostic Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/10 bg-black/20">
+                {/* Academic Score */}
+                <div className="p-6 text-center group hover:bg-white/5 transition-colors">
+                    <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted mb-2">Academic Score</div>
+                    <div className="text-4xl md:text-5xl font-black text-white mb-1 group-hover:scale-110 transition-transform">{result.scorePercent}%</div>
+                    <div className="text-xs text-scholafy-muted">Raw Quiz Performance</div>
+                </div>
+
+                {/* Focus Index (Radial-ish) */}
+                <div className="p-6 text-center group hover:bg-white/5 transition-colors">
+                    <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted mb-2">Focus Index</div>
+                    <div className="relative inline-flex items-center justify-center">
+                        <svg className="w-20 h-20 transform -rotate-90">
+                            <circle cx="40" cy="40" r="36" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-white/10" />
+                            <circle cx="40" cy="40" r="36" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={226} strokeDashoffset={226 - (226 * focusIndex) / 100} className="text-blue-500 transition-all duration-1000 ease-out" />
+                        </svg>
+                        <span className="absolute text-xl font-bold">{focusIndex}</span>
+                    </div>
+                    <div className="text-xs text-scholafy-muted mt-2">Attention Consistency</div>
+                </div>
+
+                {/* Effort Grade */}
+                <div className="p-6 text-center group hover:bg-white/5 transition-colors">
+                    <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted mb-2">Effort Grade</div>
+                    <div className={`text-4xl md:text-5xl font-black mb-1 inline-block px-4 py-1 rounded-xl border-2 ${getGradeColor(effortGrade)}`}>
+                        {effortGrade}
+                    </div>
+                    <div className="text-xs text-scholafy-muted mt-2">Behavioral Rating</div>
+                </div>
+            </div>
+
+            {/* Growth Graph - Learning Trajectory */}
+            <div className="p-6 bg-white/5 border-t border-white/10">
+                <div className="flex items-center justify-between mb-4">
+                    <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted">Learning Trajectory</div>
+                    <div className="text-[10px] text-scholafy-muted">Before → During → After</div>
+                </div>
+                <div className="flex items-end justify-between h-32 gap-3 relative">
+                    {/* Dashed background lines with labels */}
+                    <div className="absolute inset-0 flex flex-col justify-between pointer-events-none">
+                        <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-white/30 w-6">100%</span>
+                            <div className="border-t border-white/10 border-dashed flex-1"></div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-white/30 w-6">75%</span>
+                            <div className="border-t border-white/10 border-dashed flex-1"></div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-white/30 w-6">50%</span>
+                            <div className="border-t border-white/10 border-dashed flex-1"></div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-white/30 w-6">25%</span>
+                            <div className="border-t border-white/10 border-dashed flex-1"></div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-white/30 w-6">0%</span>
+                            <div className="border-t border-white/10 flex-1"></div>
+                        </div>
+                    </div>
+
+                    {/* Starter Phase */}
+                    {(() => {
+                        const starterRecords = result.records.filter(r => r.phase === 'starter');
+                        const starterCorrect = starterRecords.filter(r => r.isCorrect).length;
+                        const starterPercent = starterRecords.length > 0 ? Math.round((starterCorrect / starterRecords.length) * 100) : 0;
+                        return (
+                            <div className="flex-1 flex flex-col justify-end items-center gap-1 group ml-8">
+                                <div className="text-xs font-bold text-blue-400">{starterPercent}%</div>
+                                <div
+                                    className="w-full max-w-[60px] bg-blue-500/30 border-2 border-blue-500 rounded-t-lg transition-all duration-500 group-hover:bg-blue-500/50 relative"
+                                    style={{ height: `${Math.max(8, starterPercent)}%` }}
+                                >
+                                    <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-blue-500 rounded-full"></div>
+                                </div>
+                                <span className="text-[10px] font-bold text-blue-400">Starter</span>
+                                <span className="text-[9px] text-scholafy-muted">{starterCorrect}/{starterRecords.length}</span>
+                            </div>
+                        );
+                    })()}
+
+                    {/* Arrow 1 */}
+                    <div className="flex items-center justify-center pb-10 opacity-40">
+                        <span className="text-lg">→</span>
+                    </div>
+
+                    {/* Video Phase (In-Video Questions) */}
+                    {(() => {
+                        const videoRecords = result.records.filter(r => r.phase === 'video');
+                        const videoCorrect = videoRecords.filter(r => r.isCorrect).length;
+                        const videoPercent = videoRecords.length > 0 ? Math.round((videoCorrect / videoRecords.length) * 100) : 0;
+                        return (
+                            <div className="flex-1 flex flex-col justify-end items-center gap-1 group">
+                                <div className="text-xs font-bold text-purple-400">{videoPercent}%</div>
+                                <div
+                                    className="w-full max-w-[60px] bg-purple-500/30 border-2 border-purple-500 rounded-t-lg transition-all duration-500 group-hover:bg-purple-500/50 relative"
+                                    style={{ height: `${Math.max(8, videoPercent)}%` }}
+                                >
+                                    <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-purple-500 rounded-full"></div>
+                                </div>
+                                <span className="text-[10px] font-bold text-purple-400">Video</span>
+                                <span className="text-[9px] text-scholafy-muted">{videoCorrect}/{videoRecords.length}</span>
+                            </div>
+                        );
+                    })()}
+
+                    {/* Arrow 2 */}
+                    <div className="flex items-center justify-center pb-10 opacity-40">
+                        <span className="text-lg">→</span>
+                    </div>
+
+                    {/* Exit Phase */}
+                    {(() => {
+                        const exitRecords = result.records.filter(r => r.phase === 'exit');
+                        const exitCorrect = exitRecords.filter(r => r.isCorrect).length;
+                        const exitPercent = exitRecords.length > 0 ? Math.round((exitCorrect / exitRecords.length) * 100) : 0;
+                        const starterRecords = result.records.filter(r => r.phase === 'starter');
+                        const starterPercent = starterRecords.length > 0 ? Math.round((starterRecords.filter(r => r.isCorrect).length / starterRecords.length) * 100) : 0;
+                        const improved = exitPercent > starterPercent;
+                        return (
+                            <div className="flex-1 flex flex-col justify-end items-center gap-1 group mr-4">
+                                <div className={`text-xs font-bold ${improved ? 'text-green-400' : 'text-yellow-400'}`}>
+                                    {exitPercent}%
+                                    {improved && <span className="ml-1">↑</span>}
+                                </div>
+                                <div
+                                    className={`w-full max-w-[60px] ${improved ? 'bg-green-500/30 border-green-500' : 'bg-yellow-500/30 border-yellow-500'} border-2 rounded-t-lg transition-all duration-500 group-hover:opacity-80 relative`}
+                                    style={{ height: `${Math.max(8, exitPercent)}%` }}
+                                >
+                                    <div className={`absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 ${improved ? 'bg-green-500' : 'bg-yellow-500'} rounded-full`}></div>
+                                </div>
+                                <span className={`text-[10px] font-bold ${improved ? 'text-green-400' : 'text-yellow-400'}`}>Exit</span>
+                                <span className="text-[9px] text-scholafy-muted">{exitCorrect}/{exitRecords.length}</span>
+                            </div>
+                        );
+                    })()}
+                </div>
+
+                {/* Learning Insight */}
+                {(() => {
+                    const starterRecords = result.records.filter(r => r.phase === 'starter');
+                    const exitRecords = result.records.filter(r => r.phase === 'exit');
+                    const starterPercent = starterRecords.length > 0 ? Math.round((starterRecords.filter(r => r.isCorrect).length / starterRecords.length) * 100) : 0;
+                    const exitPercent = exitRecords.length > 0 ? Math.round((exitRecords.filter(r => r.isCorrect).length / exitRecords.length) * 100) : 0;
+                    const diff = exitPercent - starterPercent;
+
+                    let message = '';
+                    let icon = '';
+                    if (diff > 20) { message = 'Excellent learning gain! The lesson content was well absorbed.'; icon = '🚀'; }
+                    else if (diff > 0) { message = 'Positive progress shown. Understanding improved after the lesson.'; icon = '📈'; }
+                    else if (diff === 0) { message = 'Performance stayed consistent. May need reinforcement.'; icon = '➖'; }
+                    else { message = 'Exit score lower than starter. Consider revisiting this topic.'; icon = '🔄'; }
+
+                    return (
+                        <div className="mt-4 pt-4 border-t border-white/10 flex items-center gap-3">
+                            <span className="text-xl">{icon}</span>
+                            <span className="text-xs text-scholafy-muted">{message}</span>
+                            {diff !== 0 && (
+                                <span className={`text-xs font-bold ${diff > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {diff > 0 ? '+' : ''}{diff}%
+                                </span>
+                            )}
+                        </div>
+                    );
+                })()}
+            </div>
         </div>
     );
 };
@@ -369,8 +579,12 @@ const ResultSection: React.FC<{ title: string, records: QuestionRecord[] }> = ({
     );
 };
 
+
+
 export const ParentDashboard: React.FC = () => {
-    const { setView, availableLessons, assignedLessons, assignLesson, unassignLesson, lessonHistory, curriculumStats, childProfile } = useApp();
+    const { availableLessons, assignedLessons, assignLesson, unassignLesson, lessonHistory, curriculumStats, childProfile, isLoading } = useApp();
+    const { user, signOut } = useAuth();
+    const navigate = useNavigate(); // Added this line
     const [activeTab, setActiveTab] = useState<'monitor' | 'plan' | 'history' | 'standards'>('monitor');
     const [liveData, setLiveData] = useState<LiveStatus | null>(null);
     const [selectedResult, setSelectedResult] = useState<LessonResult | null>(null);
@@ -379,7 +593,9 @@ export const ParentDashboard: React.FC = () => {
     const [expandedStrands, setExpandedStrands] = useState<Set<string>>(new Set());
     const [stagingQueue, setStagingQueue] = useState<Lesson[]>([]);
     const [isCloudConnected, setIsCloudConnected] = useState(false);
-    const { user } = useAuth();
+
+
+
 
     // --- SYNC LOGIC ---
     const fetchInitialLive = useCallback(async () => {
@@ -402,7 +618,8 @@ export const ParentDashboard: React.FC = () => {
                 stats: data.stats,
                 history: data.history,
                 lastUpdate: new Date(data.last_update).getTime(),
-                alerts: []
+                alerts: [],
+                profileId: data.profile_id
             });
         } else {
             setLiveData(null);
@@ -438,7 +655,8 @@ export const ParentDashboard: React.FC = () => {
                         stats: data.stats,
                         history: data.history,
                         lastUpdate: new Date(data.last_update).getTime(),
-                        alerts: []
+                        alerts: [],
+                        profileId: data.profile_id
                     });
                 }
             })
@@ -465,6 +683,11 @@ export const ParentDashboard: React.FC = () => {
         setStagingQueue(prev => prev.filter(l => l.id !== lessonId));
     };
 
+    const handleLogout = async () => {
+        await signOut();
+        navigate('/');
+    };
+
     const publishQueue = async () => {
         for (const lesson of stagingQueue) {
             await assignLesson(lesson.id);
@@ -489,6 +712,10 @@ export const ParentDashboard: React.FC = () => {
         return strands;
     };
 
+    if (isLoading) return <div className="min-h-screen bg-[#0b1527] flex items-center justify-center text-white p-6"><div className="animate-pulse font-bold">Loading Parent Dashboard...</div></div>;
+    if (!childProfile) return <div className="min-h-screen bg-[#0b1527] flex items-center justify-center text-white p-6">Profile Not Found. Please check Child Dashboard to initialize.</div>;
+
+
     return (
         <div className="min-h-screen bg-[#0b1527] text-white flex flex-col font-sans selection:bg-blue-500 selection:text-white">
             <div className="absolute top-[-20%] right-[-10%] w-[50%] h-[50%] bg-blue-600/10 rounded-full blur-[120px] pointer-events-none fixed" />
@@ -510,7 +737,7 @@ export const ParentDashboard: React.FC = () => {
                         <h1 className="text-xl md:text-2xl font-bold">Parent Dashboard</h1>
                     </div>
                 </div>
-                <button onClick={() => setView(ViewState.LANDING)} className="self-end md:self-auto px-5 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-sm font-medium text-scholafy-muted hover:text-white">Log Out</button>
+                <button onClick={handleLogout} className="self-end md:self-auto px-5 py-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-sm font-medium text-scholafy-muted hover:text-white">Log Out</button>
             </header>
 
             <div className="w-full max-w-7xl mx-auto px-4 md:px-6 mb-8 z-10">
@@ -542,12 +769,13 @@ export const ParentDashboard: React.FC = () => {
                             <div className="col-span-1 bg-scholafy-card/60 backdrop-blur-md border border-white/10 rounded-2xl p-6 flex flex-col items-center justify-center text-center">
                                 <div className="text-xs font-bold uppercase tracking-widest text-scholafy-muted mb-4">Projected Standard</div>
                                 <div className="flex gap-3 mb-4">
-                                    <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'WTS' ? 'bg-red-500 shadow-[0_0_10px_red]' : 'bg-white/10'}`}></div>
-                                    <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'EXS' ? 'bg-yellow-500 shadow-[0_0_10px_orange]' : 'bg-white/10'}`}></div>
+                                    <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'PK' ? 'bg-red-600 shadow-[0_0_10px_red]' : 'bg-white/10'}`}></div>
+                                    <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'WTS' ? 'bg-orange-500 shadow-[0_0_10px_orange]' : 'bg-white/10'}`}></div>
+                                    <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'EXS' ? 'bg-yellow-500 shadow-[0_0_10px_rgb(234,179,8)]' : 'bg-white/10'}`}></div>
                                     <div className={`w-4 h-4 rounded-full ${curriculumStats.currentStandard === 'GDS' ? 'bg-green-500 shadow-[0_0_10px_green]' : 'bg-white/10'}`}></div>
                                 </div>
-                                <h3 className={`text-4xl font-bold mb-2 ${curriculumStats.currentStandard === 'GDS' ? 'text-green-500' : curriculumStats.currentStandard === 'EXS' ? 'text-yellow-500' : 'text-red-500'}`}>{curriculumStats.currentStandard}</h3>
-                                <p className="text-sm text-scholafy-muted">{curriculumStats.currentStandard === 'GDS' ? 'Greater Depth' : curriculumStats.currentStandard === 'EXS' ? 'Expected' : 'Working Towards'}</p>
+                                <h3 className={`text-4xl font-bold mb-2 ${curriculumStats.currentStandard === 'GDS' ? 'text-green-500' : curriculumStats.currentStandard === 'EXS' ? 'text-yellow-500' : curriculumStats.currentStandard === 'WTS' ? 'text-orange-500' : 'text-red-600'}`}>{curriculumStats.currentStandard}</h3>
+                                <p className="text-sm text-scholafy-muted font-medium">{curriculumStats.currentStandard === 'GDS' ? 'Greater Depth' : curriculumStats.currentStandard === 'EXS' ? 'Expected' : curriculumStats.currentStandard === 'WTS' ? 'Working Towards' : 'Foundations'}</p>
                             </div>
                             <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
                                 <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
@@ -623,7 +851,25 @@ export const ParentDashboard: React.FC = () => {
                                                                         <div className="font-bold text-sm">{lesson.title}</div>
                                                                         <div className="text-xs text-scholafy-muted">⏱ {lesson.estimatedMinutes}m | {lesson.goal}</div>
                                                                     </div>
-                                                                    <Button variant={isAssigned ? 'outline' : isStaged ? 'secondary' : 'primary'} disabled={isAssigned} onClick={() => isStaged ? removeFromStaging(lesson.id) : addToStaging(lesson)} className="py-2 px-4 text-xs">{isAssigned ? 'Allocated' : isStaged ? 'Remove' : '+ Allocate'}</Button>
+                                                                    <div className="flex gap-2">
+                                                                        <Button
+                                                                            variant={isAssigned ? 'outline' : isStaged ? 'secondary' : 'primary'}
+                                                                            disabled={isAssigned}
+                                                                            onClick={() => isStaged ? removeFromStaging(lesson.id) : addToStaging(lesson)}
+                                                                            className="py-2 px-4 text-xs"
+                                                                        >
+                                                                            {isAssigned ? 'Allocated' : isStaged ? 'Remove' : '+ Allocate'}
+                                                                        </Button>
+                                                                        {isAssigned && (
+                                                                            <Button
+                                                                                variant="danger"
+                                                                                onClick={() => unassignLesson(lesson.id)}
+                                                                                className="py-2 px-3 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20"
+                                                                            >
+                                                                                ✕
+                                                                            </Button>
+                                                                        )}
+                                                                    </div>
                                                                 </div>
                                                             );
                                                         })}
@@ -686,17 +932,7 @@ export const ParentDashboard: React.FC = () => {
                             <h2 className="text-2xl font-bold">{availableLessons.find(l => l.id === selectedResult.lessonId)?.title}</h2>
                             <button onClick={() => setSelectedResult(null)} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/10">✕</button>
                         </div>
-                        <TeacherFeedbackCard result={selectedResult} lesson={availableLessons.find(l => l.id === selectedResult.lessonId)} />
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
-                            <div className="p-5 bg-white/5 rounded-xl border border-white/10 text-center">
-                                <div className="text-xs uppercase text-scholafy-muted mb-1">Score</div>
-                                <div className="text-3xl font-bold text-green-400">{selectedResult.scorePercent}%</div>
-                            </div>
-                            <div className="p-5 bg-white/5 rounded-xl border border-white/10 text-center">
-                                <div className="text-xs uppercase text-scholafy-muted mb-1">Effort</div>
-                                <div className="text-3xl font-bold text-white">+{selectedResult.xpEarned} XP</div>
-                            </div>
-                        </div>
+                        <DiagnosticReportCard result={selectedResult} lesson={availableLessons.find(l => l.id === selectedResult.lessonId)} />
                         <div className="mt-8">
                             <ResultSection title="Detailed Breakdown" records={selectedResult.records} />
                         </div>

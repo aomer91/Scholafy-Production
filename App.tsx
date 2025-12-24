@@ -1,5 +1,5 @@
-
 import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from './context/AppContext';
 import { ViewState } from './types';
 import { ParentDashboard } from './pages/ParentDashboard';
@@ -114,19 +114,19 @@ const PinPad: React.FC<{
 };
 
 // --- AUTH SCREEN ---
-const AuthScreen: React.FC = () => {
-  const { setView } = useApp();
+export const AuthScreen: React.FC = () => {
+  const navigate = useNavigate();
   const [step, setStep] = useState<'select' | 'auth'>('select');
-  const [selectedRole, setSelectedRole] = useState<{ name: string, view: ViewState, pin: string } | null>(null);
+  const [selectedRole, setSelectedRole] = useState<{ name: string, path: string, pin: string } | null>(null);
 
-  const handleSelect = (name: string, view: ViewState, pin: string) => {
-    setSelectedRole({ name, view, pin });
+  const handleSelect = (name: string, path: string, pin: string) => {
+    setSelectedRole({ name, path, pin });
     setStep('auth');
   };
 
   const handleAuthSuccess = () => {
     if (selectedRole) {
-      setView(selectedRole.view);
+      navigate(selectedRole.path);
     }
   };
 
@@ -136,7 +136,7 @@ const AuthScreen: React.FC = () => {
       <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none" />
 
       <div className="absolute top-6 left-6 z-20 flex gap-4">
-        <button onClick={() => setView(ViewState.LANDING)} className="flex items-center gap-2 text-scholafy-muted hover:text-white transition-colors text-sm font-medium">
+        <button onClick={() => navigate('/')} className="flex items-center gap-2 text-scholafy-muted hover:text-white transition-colors text-sm font-medium">
           <span>←</span> Home
         </button>
       </div>
@@ -162,7 +162,7 @@ const AuthScreen: React.FC = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10 w-full max-w-lg md:max-w-4xl">
               <button
-                onClick={() => handleSelect("Shakir", ViewState.CHILD_DASHBOARD, "0000")}
+                onClick={() => handleSelect("Shakir", "/child", "0000")}
                 className="group relative bg-scholafy-card/40 hover:bg-scholafy-card/60 border border-white/10 hover:border-scholafy-accent/50 p-6 md:p-12 rounded-3xl md:rounded-[2.5rem] transition-all duration-300 hover:-translate-y-2 hover:shadow-[0_20px_60px_-15px_rgba(243,197,0,0.15)] flex flex-row md:flex-col items-center text-left md:text-center backdrop-blur-xl overflow-hidden gap-6 md:gap-0"
               >
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-scholafy-accent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -179,7 +179,7 @@ const AuthScreen: React.FC = () => {
               </button>
 
               <button
-                onClick={() => handleSelect("Parent", ViewState.PARENT_DASHBOARD, "1234")}
+                onClick={() => handleSelect("Parent", "/parent", "1234")}
                 className="group relative bg-scholafy-card/40 hover:bg-scholafy-card/60 border border-white/10 hover:border-blue-400/50 p-6 md:p-12 rounded-3xl md:rounded-[2.5rem] transition-all duration-300 hover:-translate-y-2 hover:shadow-[0_20px_60px_-15px_rgba(59,130,246,0.15)] flex flex-row md:flex-col items-center text-left md:text-center backdrop-blur-xl overflow-hidden gap-6 md:gap-0"
               >
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-400 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -213,12 +213,12 @@ const AuthScreen: React.FC = () => {
 
 
 
-const SignOutButton = () => {
+export const SignOutButton = () => {
   const { signOut } = useAuth();
-  const { setView } = useApp();
+  const navigate = useNavigate();
   return (
     <button
-      onClick={() => { signOut(); setView(ViewState.LANDING); }}
+      onClick={() => { signOut(); navigate('/'); }}
       className="text-scholafy-muted hover:text-white text-sm font-medium px-4 py-2 hover:bg-white/5 rounded-lg transition-all border border-white/10"
     >
       Sign Out
@@ -226,17 +226,12 @@ const SignOutButton = () => {
   )
 }
 
+import { AppRoutes } from './AppRoutes';
+
 // --- APP CONTENT SWITCHER ---
 const AppContent: React.FC = () => {
-  const { view, setView } = useApp();
+  const { view } = useApp();
   const { session, loading } = useAuth();
-
-  useEffect(() => {
-    if (!loading && !session && view !== ViewState.LANDING && view !== ViewState.ROLE_SELECT) {
-      // Optionally redirect to landing or auth if trying to access protected route without session
-      // For now, we handle it in the switch
-    }
-  }, [session, loading, view]);
 
   // If Supabase is NOT configured, block the app with a friendly guide
   if (!isSupabaseConfigured()) {
@@ -247,35 +242,7 @@ const AppContent: React.FC = () => {
     return <div className="min-h-screen bg-[#0b1527] flex items-center justify-center text-white">Loading...</div>;
   }
 
-  // Intercept ROLE_SELECT. If no session, show Auth. If session, show Profile Select (AuthScreen)
-  if (view === ViewState.ROLE_SELECT && !session) {
-    return (
-      <div className="min-h-screen bg-[#0b1527] relative overflow-hidden flex flex-col items-center justify-center font-sans text-white">
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-scholafy-accent/5 rounded-full blur-[120px] pointer-events-none" />
-        <div className="absolute top-6 left-6 z-20">
-          <button onClick={() => setView(ViewState.LANDING)} className="flex items-center gap-2 text-scholafy-muted hover:text-white transition-colors text-sm font-medium">
-            <span>←</span> Home
-          </button>
-        </div>
-        <Auth />
-      </div>
-    );
-  }
-
-  switch (view) {
-    case ViewState.LANDING:
-      return <LandingPage />;
-    case ViewState.ROLE_SELECT:
-      return <AuthScreen />;
-    case ViewState.CHILD_DASHBOARD:
-      return session ? <ChildDashboard /> : <AuthScreen />; // Should force login if protected
-    case ViewState.PARENT_DASHBOARD:
-      return session ? <ParentDashboard /> : <AuthScreen />;
-    case ViewState.PLAYER:
-      return session ? <Player /> : <AuthScreen />;
-    default:
-      return <div>Error</div>;
-  }
+  return <AppRoutes />;
 };
 
 export default AppContent;
