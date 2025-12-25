@@ -40,6 +40,13 @@ export const Auth = () => {
                 navigate('/select-profile');
             }
         } catch (error: any) {
+            console.error('Auth Error Details:', {
+                message: error.message,
+                status: error.status,
+                code: error.code,
+                name: error.name,
+                full: error
+            });
             setMessage({ type: 'error', text: error.message || 'An error occurred' });
         } finally {
             setLoading(false);
