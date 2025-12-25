@@ -10,11 +10,6 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
-// Debug logging to verify environment variables in production
-console.log('Supabase Configuration Debug:');
-console.log('URL:', supabaseUrl);
-console.log('Key Length:', supabaseAnonKey?.length);
-console.log('Key Start:', supabaseAnonKey?.substring(0, 5));
 
 
 export const isSupabaseConfigured = () => {
