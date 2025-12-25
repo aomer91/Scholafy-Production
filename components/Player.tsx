@@ -602,6 +602,7 @@ export const Player: React.FC = () => {
       if (isFinished) {
         setSessionResult(result);
         setPhase('complete');
+        setIsSaving(false);
       } else {
         exitToDashboard();
       }
