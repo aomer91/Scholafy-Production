@@ -7,8 +7,16 @@ import { createClient } from '@supabase/supabase-js';
  * Create a .env file with VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
  * See .env.example for the template.
  */
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+// Fallback to hardcoded values if env vars are missing (ensures deploy works)
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string) || "https://wfhcsscxodigflupaddq.supabase.co";
+const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndmaGNzc2N4b2RpZ2ZsdXBhZGRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYwNDg0OTQsImV4cCI6MjA4MTYyNDQ5NH0.P_5Ci7axo68rEJ5DZL1luI_MLxe-Bh4kX-3jv86mp9c";
+
+console.log('Supabase Final Config:', {
+  url: supabaseUrl,
+  keyLength: supabaseAnonKey?.length,
+  isHardcoded: !import.meta.env.VITE_SUPABASE_URL
+});
+
 
 
 
